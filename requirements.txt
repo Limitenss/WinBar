@@ -1,0 +1,8 @@
+customtkinter
+psutil
+pystray
+pywin32
+Pillow
+requests
+watchdog
+darkdetect
