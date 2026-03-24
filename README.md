@@ -6,3 +6,7 @@ AI has helped me with the following:
 
 # Keybinds
 - CTRL + E to enter layout/edit mode! (drag and drop icons to move them) (you can also edit it in your config.json)
+
+## How to exit
+you can exit the app by clicking quit app button within settings
+(you also might have to remove it from startup if you dont want it to startup all the time)
