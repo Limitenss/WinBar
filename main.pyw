@@ -1,23 +1,98 @@
-import os
-import json
-import datetime
+from typing import Text
+import os, json, datetime, sys, subprocess, requests
 import customtkinter as ctk
-import win32gui
-import win32con
-import psutil
-import pystray
+import win32gui, win32con, win32api, win32ui, win32process
+import psutil, pystray, threading, winreg, ctypes, atexit
 from PIL import Image, ImageDraw
-import threading
-import winreg
-import sys
-import subprocess
-import ctypes
 from ctypes import wintypes
-import atexit
-import win32api
-import win32ui
-import win32process
-import requests
+
+
+def get_new_data():
+    now = datetime.datetime.now()
+    return f"{now.strftime('%#I:%M %p')}  •  {now.strftime('%a, %b %#d')}"
+
+
+def search_windows_apps(query):
+    search_paths = [
+        os.path.join(
+            os.environ["ProgramData"], "Microsoft", "Windows", "Start Menu", "Programs"
+        ),
+        os.path.join(
+            os.environ["AppData"], "Microsoft", "Windows", "Start Menu", "Programs"
+        ),
+    ]
+    results = []
+    query = query.lower()
+    for path in search_paths:
+        if os.path.exists(path):
+            for root, dirs, files in os.walk(path):
+                for file in files:
+                    if file.endswith(".lnk") and query in file.lower():
+                        results.append(
+                            {"name": file[:-4], "path": os.path.join(root, file)}
+                        )
+    return results[:7]
+
+
+def get_running_apps():
+    hwnds = []
+    win32gui.EnumWindows(lambda hwnd, param: param.append(hwnd), hwnds)
+    valid = []
+    blacklist = [
+        "Program Manager",
+        "Microsoft Text Input Application",
+        "NVIDIA GeForce Overlay",
+        "Discord Updater",
+        "CTkToplevel",
+    ]
+    for h in hwnds:
+        if win32gui.IsWindowVisible(h):
+            title = win32gui.GetWindowText(h)
+            if not title or any(name in title for name in blacklist):
+                continue
+            style = win32gui.GetWindowLong(h, win32con.GWL_EXSTYLE)
+            is_tool = style & win32con.WS_EX_TOOLWINDOW
+            is_app = style & win32con.WS_EX_APPWINDOW
+            if is_app and not is_tool:
+                valid.append({"title": title, "hwnd": h})
+            elif not is_tool and win32gui.GetParent(h) == 0:
+                valid.append({"title": title, "hwnd": h})
+    return valid
+
+
+def get_exe_from_hwnd(hwnd):
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        return psutil.Process(pid).exe()
+    except Exception:
+        return None
+
+
+def get_icon_from_exe(exe_path):
+    try:
+        large, small = win32gui.ExtractIconEx(exe_path, 0)
+        if not large:
+            return None
+        for s in small:
+            win32gui.DestroyIcon(s)
+        hicon = large[0]
+        for i in range(1, len(large)):
+            win32gui.DestroyIcon(large[i])
+        hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
+        hbmp = win32ui.CreateBitmap()
+        hbmp.CreateCompatibleBitmap(hdc, 32, 32)
+        hdc = hdc.CreateCompatibleDC()
+        hdc.SelectObject(hbmp)
+        hdc.DrawIcon((0, 0), hicon)
+        bmpstr = hbmp.GetBitmapBits(True)
+        img = Image.frombuffer("RGBA", (32, 32), bmpstr, "raw", "BGRA", 0, 1)
+        win32gui.DestroyIcon(hicon)
+        hdc.DeleteDC()
+        win32gui.ReleaseDC(0, hdc.GetHandleOutput())
+        return img
+    except Exception:
+        return None
+
 
 ABM_NEW = 0x00000000
 ABM_REMOVE = 0x00000001
@@ -44,26 +119,28 @@ class APPBARDATA(ctypes.Structure):
 global_abd = None
 
 
-def search_windows_apps(query):
-    search_paths = [
-        os.path.join(
-            os.environ["ProgramData"], "Microsoft", "Windows", "Start Menu", "Programs"
-        ),
-        os.path.join(
-            os.environ["AppData"], "Microsoft", "Windows", "Start Menu", "Programs"
-        ),
-    ]
-    results = []
-    query = query.lower()
-    for path in search_paths:
-        if os.path.exists(path):
-            for root, dirs, files in os.walk(path):
-                for file in files:
-                    if file.endswith(".lnk") and query in file.lower():
-                        results.append(
-                            {"name": file[:-4], "path": os.path.join(root, file)}
-                        )
-    return results[:7]
+def register_appbar(window_id, bar_height, padding_y, edge=ABE_TOP):
+    global global_abd
+    global_abd = APPBARDATA()
+    global_abd.cbSize = ctypes.sizeof(APPBARDATA)
+    global_abd.hWnd = window_id
+    global_abd.uEdge = edge
+    ctypes.windll.shell32.SHAppBarMessage(ABM_NEW, ctypes.byref(global_abd))
+    sw = ctypes.windll.user32.GetSystemMetrics(0)
+    sh = ctypes.windll.user32.GetSystemMetrics(1)
+    if edge == ABE_TOP:
+        global_abd.rc.top, global_abd.rc.bottom = 0, bar_height + padding_y + 10
+    else:
+        global_abd.rc.top, global_abd.rc.bottom = sh - (bar_height + padding_y + 10), sh
+    global_abd.rc.left, global_abd.rc.right = 0, sw
+    ctypes.windll.shell32.SHAppBarMessage(ABM_SETPOS, ctypes.byref(global_abd))
+
+
+def unregister_appbar():
+    global global_abd
+    if global_abd:
+        ctypes.windll.shell32.SHAppBarMessage(ABM_REMOVE, ctypes.byref(global_abd))
+        global_abd = None
 
 
 def set_taskbar_visibility(visible=True):
@@ -100,71 +177,6 @@ def reset_work_area():
     sh = ctypes.windll.user32.GetSystemMetrics(1)
     rect = wintypes.RECT(0, 0, sw, sh)
     ctypes.windll.user32.SystemParametersInfoW(0x002F, 0, ctypes.byref(rect), 0x02)
-
-
-def get_icon_from_exe(exe_path):
-    try:
-        large, small = win32gui.ExtractIconEx(exe_path, 0)
-        if not large:
-            return None
-        for s in small:
-            win32gui.DestroyIcon(s)
-        hicon = large[0]
-        for i in range(1, len(large)):
-            win32gui.DestroyIcon(large[i])
-        hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
-        hbmp = win32ui.CreateBitmap()
-        hbmp.CreateCompatibleBitmap(hdc, 32, 32)
-        hdc = hdc.CreateCompatibleDC()
-        hdc.SelectObject(hbmp)
-        hdc.DrawIcon((0, 0), hicon)
-        bmpstr = hbmp.GetBitmapBits(True)
-        img = Image.frombuffer("RGBA", (32, 32), bmpstr, "raw", "BGRA", 0, 1)
-        win32gui.DestroyIcon(hicon)
-        hdc.DeleteDC()
-        win32gui.ReleaseDC(0, hdc.GetHandleOutput())
-        return img
-    except Exception:
-        return None
-
-
-def get_exe_from_hwnd(hwnd):
-    try:
-        _, pid = win32process.GetWindowThreadProcessId(hwnd)
-        return psutil.Process(pid).exe()
-    except Exception:
-        return None
-
-
-def register_appbar(window_id, bar_height, padding_y, edge=ABE_TOP):
-    global global_abd
-    global_abd = APPBARDATA()
-    global_abd.cbSize = ctypes.sizeof(APPBARDATA)
-    global_abd.hWnd = window_id
-    global_abd.uEdge = edge
-    ctypes.windll.shell32.SHAppBarMessage(ABM_NEW, ctypes.byref(global_abd))
-    sw = ctypes.windll.user32.GetSystemMetrics(0)
-    sh = ctypes.windll.user32.GetSystemMetrics(1)
-
-    if edge == ABE_TOP:
-        global_abd.rc.top, global_abd.rc.bottom = 0, bar_height + padding_y + 10
-    else:
-        global_abd.rc.top, global_abd.rc.bottom = sh - (bar_height + padding_y + 10), sh
-
-    global_abd.rc.left, global_abd.rc.right = 0, sw
-    ctypes.windll.shell32.SHAppBarMessage(ABM_SETPOS, ctypes.byref(global_abd))
-
-
-def unregister_appbar():
-    global global_abd
-    if global_abd:
-        ctypes.windll.shell32.SHAppBarMessage(ABM_REMOVE, ctypes.byref(global_abd))
-        global_abd = None
-
-
-def get_new_data():
-    now = datetime.datetime.now()
-    return f"{now.strftime('%#I:%M %p')}  •  {now.strftime('%a, %b %#d')}"
 
 
 def install_to_startup():
@@ -204,40 +216,11 @@ def setup_system_tray(app_instance):
     icon.run()
 
 
-def get_running_apps():
-    hwnds = []
-    win32gui.EnumWindows(lambda hwnd, param: param.append(hwnd), hwnds)
-    valid = []
-    blacklist = [
-        "Program Manager",
-        "Microsoft Text Input Application",
-        "NVIDIA GeForce Overlay",
-        "Discord Updater",
-    ]
-
-    for h in hwnds:
-        if win32gui.IsWindowVisible(h):
-            title = win32gui.GetWindowText(h)
-            if not title or any(name in title for name in blacklist):
-                continue
-
-            style = win32gui.GetWindowLong(h, win32con.GWL_EXSTYLE)
-            is_tool = style & win32con.WS_EX_TOOLWINDOW
-            is_app = style & win32con.WS_EX_APPWINDOW
-
-            if is_app and not is_tool:
-                valid.append({"title": title, "hwnd": h})
-            elif not is_tool and win32gui.GetParent(h) == 0:
-                valid.append({"title": title, "hwnd": h})
-    return valid
-
-
 class FloatingBar(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Limitens_FloatingBar")
         self.overrideredirect(True)
-
         CK = "#000001"
         self.configure(fg_color=CK)
 
@@ -262,7 +245,7 @@ class FloatingBar(ctk.CTk):
             "bg_color": "#1e1e1e",
             "opacity": 0.631,
             "layout": {
-                "left": ["apps", "active_window"],
+                "left": ["start", "apps", "active_window"],
                 "center": ["search"],
                 "right": ["taskmanager", "sys_monitor", "clock", "tray"],
             },
@@ -275,11 +258,9 @@ class FloatingBar(ctk.CTk):
             application_path = os.path.dirname(os.path.abspath(__file__))
 
         self.config_path = os.path.join(application_path, "config.json")
-
         if not os.path.exists(self.config_path):
             with open(self.config_path, "w") as f:
                 json.dump(DEFAULT_CONFIG, f, indent=4)
-
         try:
             with open(self.config_path, "r") as f:
                 self.config = DEFAULT_CONFIG | json.load(f)
@@ -287,7 +268,6 @@ class FloatingBar(ctk.CTk):
             self.config = DEFAULT_CONFIG.copy()
 
         self.pill_frame.configure(fg_color=self.config.get("bg_color"))
-
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         w = int(sw * (float(self.config.get("width_percent", 90)) / 100))
@@ -300,7 +280,6 @@ class FloatingBar(ctk.CTk):
 
         self.geo_string = f"{w}x{h}+{(sw - w) // 2}+{y_pos}"
         self.geometry(self.geo_string)
-
         self.wm_attributes(
             "-transparentcolor",
             CK,
@@ -322,7 +301,6 @@ class FloatingBar(ctk.CTk):
             font=("Segoe UI Variable", 20),
             text_color="white",
         )
-
         self.sys_container = ctk.CTkFrame(
             self.pill_frame, fg_color="transparent", width=180, height=40
         )
@@ -350,6 +328,15 @@ class FloatingBar(ctk.CTk):
         )
         self.overflow_apps = []
 
+        self.start_btn = ctk.CTkButton(
+            self.pill_frame,
+            text="❖",
+            width=30,
+            fg_color="transparent",
+            hover_color="#2a2a2a",
+            font=("Segoe UI Emoji", 18),
+            command=self.toggle_custom_start,
+        )
         self.tray_btn = ctk.CTkButton(
             self.pill_frame,
             text="⚙️",
@@ -375,10 +362,15 @@ class FloatingBar(ctk.CTk):
             fg_color="transparent",
             hover_color="#2a2a2a",
             font=("Segoe UI Emoji", 16),
-            command=lambda: subprocess.Popen("start taskmgr", shell=True),
+            command=lambda: (
+                subprocess.Popen("start taskmgr", shell=True)
+                if not self.edit_mode
+                else None
+            ),
         )
 
         self.widget_map = {
+            "start": self.start_btn,
             "search": self.search_btn,
             "apps": self.apps_container,
             "active_window": self.active_window_label,
@@ -395,115 +387,163 @@ class FloatingBar(ctk.CTk):
 
         for name, widget in self.widget_map.items():
             widget.bind(
-                "<ButtonPress-1>", lambda e, n=name: self.on_drag_start(e, n), add="+"
+                "<ButtonPress-1>", lambda e, n=name: self._on_drag_start(e, n), add="+"
             )
             widget.bind(
-                "<ButtonRelease-1>", lambda e, n=name: self.on_drag_drop(e, n), add="+"
+                "<ButtonRelease-1>", lambda e, n=name: self._on_drag_drop(e, n), add="+"
             )
 
         psutil.cpu_percent(interval=None)
         self.render_bar()
         self.check_fullscreen()
 
-    def change_position(self, value):
-        self.config["position"] = value
-        self.save_layout()
+    def render_bar(self):
+        for zone in [self.left_wing, self.center_wing, self.right_wing]:
+            for child in zone.winfo_children():
+                child.pack_forget()
 
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        w = int(sw * (float(self.config.get("width_percent", 90)) / 100))
-        h = int(self.config.get("height", 50))
-        x_pos = (sw - w) // 2
+        self.pill_frame.grid_columnconfigure(0, weight=1, uniform="side")
+        self.pill_frame.grid_columnconfigure(1, weight=0)
+        self.pill_frame.grid_columnconfigure(2, weight=1, uniform="side")
+        self.left_wing.grid(row=0, column=0, sticky="w", padx=10)
+        self.center_wing.grid(row=0, column=1)
+        self.right_wing.grid(row=0, column=2, sticky="e", padx=10)
 
-        if value == "Bottom":
-            y_pos = sh - h - 10
-            edge = ABE_BOTTOM
+        layout = self.config.get(
+            "layout",
+            {
+                "left": ["start", "apps", "active_window"],
+                "center": ["search"],
+                "right": ["taskmanager", "sys_monitor", "clock", "tray"],
+            },
+        )
+        if isinstance(layout, list):
+            layout = {"left": layout, "center": [], "right": []}
+        for key in layout.get("left", []):
+            self.add_widget_to_zone(key, self.left_wing)
+        for key in layout.get("center", []):
+            self.add_widget_to_zone(key, self.center_wing)
+        for key in layout.get("right", []):
+            self.add_widget_to_zone(key, self.right_wing)
+
+    def add_widget_to_zone(self, key, zone):
+        if key in self.widget_map:
+            self.widget_map[key].pack(in_=zone, side="left", padx=5)
+
+    def update_time(self):
+        self.my_label.configure(text=get_new_data())
+        self.sys_label.configure(
+            text=f"CPU: {int(psutil.cpu_percent()):2}% | RAM: {int(psutil.virtual_memory().percent)}%"
+        )
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            title = win32gui.GetWindowText(hwnd)
+            if title:
+                self.active_window_label.configure(text=f" > {title[:30]}...")
+            else:
+                self.active_window_label.configure(text="")
+        except:
+            pass
+        self.after(1000, self.update_time)
+
+    def update_open_apps(self):
+        if not hasattr(self, "active_app_buttons"):
+            self.active_app_buttons = {}
+            pinned = self.config.get("pinned_apps", [])
+            for app in pinned:
+                if os.path.exists(app["path"]):
+                    img = get_icon_from_exe(app["path"])
+                    bar_h = int(self.config.get("height", 50))
+                    icon = (
+                        ctk.CTkImage(
+                            img, img, size=(int(bar_h * 0.45), int(bar_h * 0.45))
+                        )
+                        if img
+                        else None
+                    )
+                    p_btn = ctk.CTkButton(
+                        self.apps_container,
+                        text="" if icon else app["name"][:3],
+                        image=icon,
+                        width=int(bar_h * 0.75),
+                        height=int(bar_h * 0.75),
+                        fg_color="transparent",
+                        command=lambda p=app["path"]: subprocess.Popen([p]),
+                    )
+                    p_btn._full_name = app["name"]
+                    p_btn.pack(side="left", padx=2)
+            if pinned:
+                ctk.CTkFrame(
+                    self.apps_container, width=2, height=20, fg_color="#555555"
+                ).pack(side="left", padx=5)
+
+        bar_h = int(self.config.get("height", 50))
+        current_windows = get_running_apps()
+        cur_hwnds = [app["hwnd"] for app in current_windows]
+
+        for app in current_windows:
+            if any(
+                x in app["title"]
+                for x in ["FloatingBar", "Limitens", "NVIDIA", "Overlay", "CTkToplevel"]
+            ):
+                continue
+            hid = app["hwnd"]
+            if hid not in self.active_app_buttons:
+                path = get_exe_from_hwnd(hid)
+                img = get_icon_from_exe(path) if path else None
+                icon = (
+                    ctk.CTkImage(img, img, size=(int(bar_h * 0.45), int(bar_h * 0.45)))
+                    if img
+                    else None
+                )
+                btn = ctk.CTkButton(
+                    self.apps_container,
+                    text="" if icon else app["title"][:8],
+                    image=icon,
+                    width=int(bar_h * 0.75),
+                    height=int(bar_h * 0.75),
+                    fg_color="#1a3b5c",
+                    hover_color="#3d5a80",
+                    corner_radius=10,
+                    command=lambda h=hid: self.focus_window(h),
+                )
+                btn._full_name = app["title"]
+                btn.pack(side="left", padx=2)
+                self.active_app_buttons[hid] = btn
+
+        for old_id in list(self.active_app_buttons.keys()):
+            if old_id not in cur_hwnds:
+                if self.active_app_buttons[old_id].winfo_exists():
+                    self.active_app_buttons[old_id].destroy()
+                del self.active_app_buttons[old_id]
+
+        MAX_VISIBLE = 14
+        visible_count = 0
+        self.overflow_apps.clear()
+
+        children = self.apps_container.winfo_children()
+        for child in children:
+            child.pack_forget()
+        for child in children:
+            if hasattr(self, "overflow_btn") and child == self.overflow_btn:
+                continue
+            if isinstance(child, ctk.CTkButton):
+                if visible_count < MAX_VISIBLE:
+                    child.pack(side="left", padx=2)
+                    visible_count += 1
+                else:
+                    self.overflow_apps.append(child)
+            elif isinstance(child, ctk.CTkFrame):
+                if visible_count < MAX_VISIBLE:
+                    child.pack(side="left", padx=5)
+
+        if self.overflow_apps:
+            if hasattr(self, "overflow_btn"):
+                self.overflow_btn.pack(side="left", padx=2)
         else:
-            y_pos = 10
-            edge = ABE_TOP
-
-        self.geo_string = f"{w}x{h}+{x_pos}+{y_pos}"
-        self.geometry(self.geo_string)
-        self.update()
-
-        HWND_TOPMOST = -1
-        my_hwnd = ctypes.windll.user32.GetAncestor(self.winfo_id(), GA_ROOT)
-        ctypes.windll.user32.SetWindowPos(
-            my_hwnd, HWND_TOPMOST, x_pos, y_pos, w, h, 0x0040
-        )
-
-        unregister_appbar()
-        register_appbar(self.winfo_id(), h, -5, edge)
-
-        if hasattr(self, "tray_menu") and self.tray_menu.winfo_exists():
-            self.tray_menu.destroy()
-            self.toggle_control_center()
-
-    def toggle_overflow_menu(self):
-        if hasattr(self, "overflow_menu") and self.overflow_menu.winfo_exists():
-            self.overflow_menu.destroy()
-            return
-
-        if not self.overflow_apps:
-            return
-
-        self.overflow_menu = ctk.CTkToplevel(self)
-        self.overflow_menu.overrideredirect(True)
-        self.overflow_menu.attributes("-topmost", True)
-        CK = "#000001"
-        self.overflow_menu.configure(fg_color=CK)
-        self.overflow_menu.wm_attributes(
-            "-transparentcolor", CK, "-alpha", float(self.config.get("opacity", 1.0))
-        )
-
-        menu_h = min(len(self.overflow_apps) * 50 + 20, 500)
-        menu_w = 220
-        btn_x = self.overflow_btn.winfo_rootx()
-        btn_y = self.overflow_btn.winfo_rooty()
-
-        if self.config.get("position", "Top") == "Bottom":
-            pos_y = btn_y - menu_h - 10
-        else:
-            pos_y = btn_y + self.overflow_btn.winfo_height() + 10
-
-        self.overflow_menu.geometry(f"{menu_w}x{menu_h}+{btn_x}+{pos_y}")
-
-        main_frame = ctk.CTkFrame(
-            self.overflow_menu,
-            corner_radius=15,
-            border_width=1,
-            border_color="lightblue",
-            fg_color="#1a1a1b",
-        )
-        main_frame.pack(fill="both", expand=True)
-
-        scroll = ctk.CTkScrollableFrame(
-            main_frame, fg_color="transparent", corner_radius=0
-        )
-        scroll.pack(fill="both", expand=True, padx=5, pady=5)
-
-        for original_btn in self.overflow_apps:
-            icon = original_btn.cget("image")
-            cmd = original_btn.cget("command")
-            full_name = getattr(original_btn, "_full_name", "App")
-
-            btn = ctk.CTkButton(
-                scroll,
-                text=f"  {full_name[:25]}",
-                image=icon,
-                anchor="w",
-                height=40,
-                fg_color="transparent",
-                hover_color="#2a2a2a",
-                font=("Segoe UI Variable Semibold", 13),
-                command=lambda c=cmd: (
-                    [c(), self.overflow_menu.destroy()] if c else None
-                ),
-            )
-            btn.pack(fill="x", pady=2)
-
-        self.overflow_menu.bind("<FocusOut>", lambda e: self.overflow_menu.destroy())
-        self.overflow_menu.focus_set()
+            if hasattr(self, "overflow_menu") and self.overflow_menu.winfo_exists():
+                self.overflow_menu.destroy()
+        self.after(500, self.update_open_apps)
 
     def check_fullscreen(self):
         try:
@@ -511,32 +551,32 @@ class FloatingBar(ctk.CTk):
             if not hwnd:
                 self.after(500, self.check_fullscreen)
                 return
-
             my_hwnd = ctypes.windll.user32.GetAncestor(self.winfo_id(), GA_ROOT)
             is_me = hwnd == my_hwnd
-
             if hasattr(self, "search_window") and self.search_window.winfo_exists():
                 if hwnd == ctypes.windll.user32.GetAncestor(
                     self.search_window.winfo_id(), GA_ROOT
                 ):
                     is_me = True
-
             if hasattr(self, "tray_menu") and self.tray_menu.winfo_exists():
                 if hwnd == ctypes.windll.user32.GetAncestor(
                     self.tray_menu.winfo_id(), GA_ROOT
                 ):
                     is_me = True
-
             if hasattr(self, "overflow_menu") and self.overflow_menu.winfo_exists():
                 if hwnd == ctypes.windll.user32.GetAncestor(
                     self.overflow_menu.winfo_id(), GA_ROOT
+                ):
+                    is_me = True
+            if hasattr(self, "start_menu") and self.start_menu.winfo_exists():
+                if hwnd == ctypes.windll.user32.GetAncestor(
+                    self.start_menu.winfo_id(), GA_ROOT
                 ):
                     is_me = True
 
             HWND_BOTTOM = 1
             HWND_TOPMOST = -1
             FLAGS = 0x0002 | 0x0001 | 0x0010
-
             if is_me:
                 ctypes.windll.user32.SetWindowPos(
                     my_hwnd, HWND_TOPMOST, 0, 0, 0, 0, FLAGS
@@ -568,16 +608,156 @@ class FloatingBar(ctk.CTk):
                     my_hwnd, HWND_TOPMOST, 0, 0, 0, 0, FLAGS
                 )
                 self.attributes("-alpha", float(self.config.get("opacity", 1.0)))
+        except Exception:
+            pass
+        self.after(500, self.check_fullscreen)
 
+    def focus_window(self, hwnd):
+        if self.edit_mode:
+            return
+        try:
+            if win32gui.IsIconic(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(hwnd)
         except Exception:
             pass
 
-        self.after(500, self.check_fullscreen)
+    def toggle_custom_start(self):
+        if self.edit_mode:
+            return
+        if hasattr(self, "start_menu") and self.start_menu.winfo_exists():
+            self.start_menu.destroy()
+            return
+
+        self.start_menu = ctk.CTkToplevel(self)
+        self.start_menu.overrideredirect(True)
+        self.start_menu.attributes("-topmost", True)
+        CK = "#000001"
+        self.start_menu.configure(fg_color=CK)
+        self.start_menu.wm_attributes(
+            "-transparentcolor", CK, "-alpha", float(self.config.get("opacity", 1.0))
+        )
+
+        menu_w = 300
+        menu_h = 400
+        btn_x = self.start_btn.winfo_rootx()
+        btn_y = self.start_btn.winfo_rooty()
+
+        if self.config.get("position") == "Bottom":
+            pos_y = btn_y - menu_h - 10
+        else:
+            pos_y = btn_y + self.start_btn.winfo_height() + 10
+
+        self.start_menu.geometry(f"{menu_w}x{menu_h}+{btn_x}+{pos_y}")
+        main_frame = ctk.CTkFrame(
+            self.start_menu,
+            corner_radius=15,
+            border_width=1,
+            border_color="lightblue",
+            fg_color="#1a1a1b",
+        )
+        main_frame.pack(fill="both", expand=True)
+
+        current_user = os.environ.get("USERNAME", "User")
+        profile_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        profile_frame.pack(fill="x", padx=15, pady=(15, 10))
+        ctk.CTkLabel(
+            profile_frame,
+            text=f"👤 {current_user}",
+            font=("Segoe UI Variable", 20, "bold"),
+        ).pack(side="left")
+
+        self.start_scroll = ctk.CTkScrollableFrame(
+            main_frame, fg_color="transparent", corner_radius=0
+        )
+        self.start_scroll.pack(fill="both", expand=True, padx=10, pady=5)
+
+        pinned_apps = self.config.get("pinned_apps", [])
+        if not pinned_apps:
+            ctk.CTkLabel(
+                self.start_scroll, text="Add apps to config.json", text_color="#555555"
+            ).pack(pady=50)
+        else:
+            for app in pinned_apps:
+                if os.path.exists(app["path"]):
+                    img = get_icon_from_exe(app["path"])
+                    icon = ctk.CTkImage(img, img, size=(32, 32)) if img else None
+                    btn = ctk.CTkButton(
+                        self.start_scroll,
+                        text=f"  {app['name']}",
+                        image=icon,
+                        anchor="w",
+                        height=50,
+                        fg_color="transparent",
+                        hover_color="#2a2a2a",
+                        corner_radius=8,
+                        font=("Segoe UI Variable Semibold", 15),
+                        command=lambda p=app["path"]: [
+                            subprocess.Popen([p]),
+                            self.start_menu.destroy(),
+                        ],
+                    )
+                    btn.pack(fill="x", pady=2, padx=5)
+
+        bottom_bar = ctk.CTkFrame(main_frame, fg_color="#141415", corner_radius=10)
+        bottom_bar.pack(fill="x", side="bottom", padx=10, pady=10)
+
+        settings_btn = ctk.CTkButton(
+            bottom_bar,
+            text="⚙️Settings",
+            width=100,
+            fg_color="transparent",
+            hover_color="#2a2a2a",
+            anchor="w",
+            command=lambda: [
+                os.system("start ms-settings:"),
+                self.start_menu.destroy(),
+            ],
+        )
+        settings_btn.pack(side="left", padx=5, pady=5)
+        shutdown_btn = ctk.CTkButton(
+            bottom_bar,
+            text="📴",
+            width=30,
+            fg_color="#d32f2f",
+            hover_color="#9a0007",
+            font=("Segoe UI Emoji", 16),
+            command=lambda: os.system("shutdown /s /t 0"),
+        )
+        shutdown_btn.pack(side="right", padx=5, pady=5)
+        sleep_btn = ctk.CTkButton(
+            bottom_bar,
+            text="🌙",
+            width=30,
+            fg_color="#1a3b5c",
+            hover_color="#3d5a80",
+            font=("Segoe UI Emoji", 16),
+            command=lambda: os.system(
+                "rundll32.exe powrprof.dll,SetSuspendState 0,1,0"
+            ),
+        )
+        sleep_btn.pack(side="right", padx=5, pady=5)
+
+        def on_focus_out(event):
+            mx, my = self.winfo_pointerxy()
+            bx = self.start_btn.winfo_rootx()
+            by = self.start_btn.winfo_rooty()
+            bw = self.start_btn.winfo_width()
+            bh = self.start_btn.winfo_height()
+            if bx <= mx <= bx + bw and by <= my <= by + bh:
+                return
+            self.start_menu.destroy()
+
+        self.start_menu.bind("<FocusOut>", on_focus_out)
+        self.start_menu.focus_set()
 
     def toggle_search(self):
+        if self.edit_mode:
+            return
         if hasattr(self, "search_window") and self.search_window.winfo_exists():
             self.search_window.destroy()
             return
+
         self.search_window = ctk.CTkToplevel(self)
         self.search_window.overrideredirect(True)
         self.search_window.attributes("-topmost", True)
@@ -586,10 +766,10 @@ class FloatingBar(ctk.CTk):
         self.search_window.wm_attributes(
             "-transparentcolor", CK, "-alpha", float(self.config.get("opacity", 1.0))
         )
+
         search_w, search_h = 500, 450
         bar_center_x = self.winfo_x() + (self.winfo_width() // 2)
         sx = bar_center_x - (search_w // 2)
-
         if self.config.get("position", "Top") == "Bottom":
             sy = self.winfo_y() - search_h - 15
         else:
@@ -674,79 +854,13 @@ class FloatingBar(ctk.CTk):
             if hasattr(self, "search_window") and self.search_window.winfo_exists():
                 self.search_window.destroy()
 
-    def focus_window(self, hwnd):
-        if self.edit_mode:
-            return
-        try:
-            if win32gui.IsIconic(hwnd):
-                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-            win32gui.SetForegroundWindow(hwnd)
-        except Exception:
-            pass
-
-    def render_bar(self):
-        for zone in [self.left_wing, self.center_wing, self.right_wing]:
-            for child in zone.winfo_children():
-                child.pack_forget()
-
-        self.pill_frame.grid_columnconfigure(0, weight=1, uniform="side")
-        self.pill_frame.grid_columnconfigure(1, weight=0)
-        self.pill_frame.grid_columnconfigure(2, weight=1, uniform="side")
-
-        self.left_wing.grid(row=0, column=0, sticky="w", padx=10)
-        self.center_wing.grid(row=0, column=1)
-        self.right_wing.grid(row=0, column=2, sticky="e", padx=10)
-
-        layout = self.config.get(
-            "layout",
-            {
-                "left": ["apps", "active_window"],
-                "center": ["search"],
-                "right": ["taskmanager", "sys_monitor", "clock", "tray"],
-            },
-        )
-
-        if isinstance(layout, list):
-            layout = {"left": layout, "center": [], "right": []}
-
-        for key in layout.get("left", []):
-            self.add_widget_to_zone(key, self.left_wing)
-        for key in layout.get("center", []):
-            self.add_widget_to_zone(key, self.center_wing)
-        for key in layout.get("right", []):
-            self.add_widget_to_zone(key, self.right_wing)
-
-    def add_widget_to_zone(self, key, zone):
-        if key in self.widget_map:
-            self.widget_map[key].pack(in_=zone, side="left", padx=5)
-
-    def toggle_edit_mode(self, event=None):
-        self.edit_mode = not self.edit_mode
-        c = "#3b3014" if self.edit_mode else self.config.get("bg_color")
-        b = "#ffae00" if self.edit_mode else "lightblue"
-        self.pill_frame.configure(fg_color=c, border_color=b)
-        if not self.edit_mode:
-            self.save_layout()
-
-    def on_drag_start(self, event, name):
-        if self.edit_mode:
-            self.drag_data["widget_name"] = name
-
-    def on_drag_drop(self, event, name):
-        if not self.edit_mode or not self.drag_data["widget_name"]:
-            return
-        self.drag_data["widget_name"] = None
-
-    def save_layout(self):
-        with open(self.config_path, "w") as f:
-            json.dump(self.config, f, indent=4)
-
     def toggle_control_center(self):
         if self.edit_mode:
             return
         if hasattr(self, "tray_menu") and self.tray_menu.winfo_exists():
             self.tray_menu.destroy()
             return
+
         self.tray_menu = ctk.CTkToplevel(self)
         self.tray_menu.overrideredirect(True)
         CK = "#000001"
@@ -782,11 +896,8 @@ class FloatingBar(ctk.CTk):
         ctk.CTkSlider(f, from_=0.1, to=1.0, command=self.change_opacity).pack(
             pady=10, padx=20
         )
-
         pos_menu = ctk.CTkOptionMenu(
-            f,
-            values=["Top", "Bottom"],
-            command=self.change_position,
+            f, values=["Top", "Bottom"], command=self.change_position
         )
         pos_menu.set(self.config.get("position", "Top"))
         pos_menu.pack(pady=5)
@@ -794,7 +905,6 @@ class FloatingBar(ctk.CTk):
         ctk.CTkButton(
             f, text="Edit Layout", fg_color="#bd8100", command=self.toggle_edit_mode
         ).pack(pady=5)
-
         ctk.CTkButton(
             f, text="Quit App", fg_color="#d32f2f", command=self.safe_exit
         ).pack(pady=5)
@@ -804,130 +914,169 @@ class FloatingBar(ctk.CTk):
         self.config["opacity"] = v
         self.save_layout()
 
+    def change_position(self, value):
+        self.config["position"] = value
+        self.save_layout()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        w = int(sw * (float(self.config.get("width_percent", 90)) / 100))
+        h = int(self.config.get("height", 50))
+        x_pos = (sw - w) // 2
+        if value == "Bottom":
+            y_pos = sh - h - 10
+            edge = ABE_BOTTOM
+        else:
+            y_pos = 10
+            edge = ABE_TOP
+
+        self.geo_string = f"{w}x{h}+{x_pos}+{y_pos}"
+        self.geometry(self.geo_string)
+        self.update()
+
+        HWND_TOPMOST = -1
+        my_hwnd = ctypes.windll.user32.GetAncestor(self.winfo_id(), GA_ROOT)
+        ctypes.windll.user32.SetWindowPos(
+            my_hwnd, HWND_TOPMOST, x_pos, y_pos, w, h, 0x0040
+        )
+        unregister_appbar()
+        register_appbar(self.winfo_id(), h, -5, edge)
+
+        if hasattr(self, "tray_menu") and self.tray_menu.winfo_exists():
+            self.tray_menu.destroy()
+            self.toggle_control_center()
+
+    def toggle_overflow_menu(self):
+        if self.edit_mode:
+            return
+        if hasattr(self, "overflow_menu") and self.overflow_menu.winfo_exists():
+            self.overflow_menu.destroy()
+            return
+        if not self.overflow_apps:
+            return
+
+        self.overflow_menu = ctk.CTkToplevel(self)
+        self.overflow_menu.overrideredirect(True)
+        self.overflow_menu.attributes("-topmost", True)
+        CK = "#000001"
+        self.overflow_menu.configure(fg_color=CK)
+        self.overflow_menu.wm_attributes(
+            "-transparentcolor", CK, "-alpha", float(self.config.get("opacity", 1.0))
+        )
+
+        menu_h = min(len(self.overflow_apps) * 50 + 20, 500)
+        menu_w = 220
+        btn_x = self.overflow_btn.winfo_rootx()
+        btn_y = self.overflow_btn.winfo_rooty()
+
+        if self.config.get("position", "Top") == "Bottom":
+            pos_y = btn_y - menu_h - 10
+        else:
+            pos_y = btn_y + self.overflow_btn.winfo_height() + 10
+
+        self.overflow_menu.geometry(f"{menu_w}x{menu_h}+{btn_x}+{pos_y}")
+        main_frame = ctk.CTkFrame(
+            self.overflow_menu,
+            corner_radius=15,
+            border_width=1,
+            border_color="lightblue",
+            fg_color="#1a1a1b",
+        )
+        main_frame.pack(fill="both", expand=True)
+
+        scroll = ctk.CTkScrollableFrame(
+            main_frame, fg_color="transparent", corner_radius=0
+        )
+        scroll.pack(fill="both", expand=True, padx=5, pady=5)
+
+        for original_btn in self.overflow_apps:
+            icon = original_btn.cget("image")
+            cmd = original_btn.cget("command")
+            full_name = getattr(original_btn, "_full_name", "App")
+            btn = ctk.CTkButton(
+                scroll,
+                text=f"  {full_name[:25]}",
+                image=icon,
+                anchor="w",
+                height=40,
+                fg_color="transparent",
+                hover_color="#2a2a2a",
+                font=("Segoe UI Variable Semibold", 13),
+                command=lambda c=cmd: (
+                    [c(), self.overflow_menu.destroy()] if c else None
+                ),
+            )
+            btn.pack(fill="x", pady=2)
+
+        self.overflow_menu.bind("<FocusOut>", lambda e: self.overflow_menu.destroy())
+        self.overflow_menu.focus_set()
+
+    def toggle_edit_mode(self, event=None):
+        self.edit_mode = not self.edit_mode
+        c = "#3b3014" if self.edit_mode else self.config.get("bg_color")
+        b = "#ffae00" if self.edit_mode else "lightblue"
+        self.pill_frame.configure(fg_color=c, border_color=b)
+
+        if self.edit_mode:
+            self.active_window_label.configure(
+                text=" 🛠 EDIT MODE (DRAG ICONS TO REARRANGE) 🛠", text_color="#ffae00"
+            )
+            for widget in self.widget_map.values():
+                widget.configure(cursor="fleur")
+        else:
+            self.active_window_label.configure(text="", text_color="#3d5a80")
+            for widget in self.widget_map.values():
+                widget.configure(cursor="arrow")
+            self.save_layout()
+
+    def save_layout(self):
+        with open(self.config_path, "w") as f:
+            json.dump(self.config, f, indent=4)
+
+    def _on_drag_start(self, event, name):
+        if self.edit_mode:
+            self.drag_data["widget_name"] = name
+
+    def _on_drag_drop(self, event, name):
+        if not self.edit_mode or not self.drag_data.get("widget_name"):
+            return
+        source = self.drag_data["widget_name"]
+        x, y = self.winfo_pointerxy()
+        target_widget = self.winfo_containing(x, y)
+        target = None
+
+        if target_widget:
+            for key, w in self.widget_map.items():
+                if str(target_widget).startswith(str(w)):
+                    target = key
+                    break
+
+        if target and source != target:
+            layout = self.config.get("layout", {})
+            source_zone, target_zone = None, None
+            source_idx, target_idx = -1, -1
+
+            for zone_name, items in layout.items():
+                if source in items:
+                    source_zone = zone_name
+                    source_idx = items.index(source)
+                if target in items:
+                    target_zone = zone_name
+                    target_idx = items.index(target)
+
+            if source_zone and target_zone:
+                layout[source_zone].pop(source_idx)
+                layout[target_zone].insert(target_idx, source)
+                self.config["layout"] = layout
+                self.render_bar()
+                for widget in self.widget_map.values():
+                    widget.configure(cursor="fleur")
+
+        self.drag_data["widget_name"] = None
+
     def safe_exit(self):
         set_taskbar_visibility(True)
         unregister_appbar()
         self.quit()
-
-    def update_time(self):
-        self.my_label.configure(text=get_new_data())
-        self.sys_label.configure(
-            text=f"CPU: {int(psutil.cpu_percent()):2}% | RAM: {int(psutil.virtual_memory().percent)}%"
-        )
-        try:
-            hwnd = win32gui.GetForegroundWindow()
-            title = win32gui.GetWindowText(hwnd)
-            if title:
-                self.active_window_label.configure(text=f" > {title[:30]}...")
-            else:
-                self.active_window_label.configure(text="")
-        except:
-            pass
-        self.after(1000, self.update_time)
-
-    def update_open_apps(self):
-        if not hasattr(self, "active_app_buttons"):
-            self.active_app_buttons = {}
-            pinned = self.config.get("pinned_apps", [])
-            for app in pinned:
-                if os.path.exists(app["path"]):
-                    img = get_icon_from_exe(app["path"])
-                    bar_h = int(self.config.get("height", 50))
-                    icon = (
-                        ctk.CTkImage(
-                            img, img, size=(int(bar_h * 0.45), int(bar_h * 0.45))
-                        )
-                        if img
-                        else None
-                    )
-                    p_btn = ctk.CTkButton(
-                        self.apps_container,
-                        text="" if icon else app["name"][:3],
-                        image=icon,
-                        width=int(bar_h * 0.75),
-                        height=int(bar_h * 0.75),
-                        fg_color="transparent",
-                        command=lambda p=app["path"]: subprocess.Popen([p]),
-                    )
-                    p_btn._full_name = app["name"]
-                    p_btn.pack(side="left", padx=2)
-
-            if pinned:
-                ctk.CTkFrame(
-                    self.apps_container, width=2, height=20, fg_color="#555555"
-                ).pack(side="left", padx=5)
-
-        bar_h = int(self.config.get("height", 50))
-        current_windows = get_running_apps()
-        cur_hwnds = [app["hwnd"] for app in current_windows]
-
-        for app in current_windows:
-            if any(
-                x in app["title"]
-                for x in ["FloatingBar", "Limitens", "NVIDIA", "Overlay"]
-            ):
-                continue
-            hid = app["hwnd"]
-            if hid not in self.active_app_buttons:
-                path = get_exe_from_hwnd(hid)
-                img = get_icon_from_exe(path) if path else None
-                icon = (
-                    ctk.CTkImage(img, img, size=(int(bar_h * 0.45), int(bar_h * 0.45)))
-                    if img
-                    else None
-                )
-
-                btn = ctk.CTkButton(
-                    self.apps_container,
-                    text="" if icon else app["title"][:8],
-                    image=icon,
-                    width=int(bar_h * 0.75),
-                    height=int(bar_h * 0.75),
-                    fg_color="#1a3b5c",
-                    hover_color="#3d5a80",
-                    corner_radius=10,
-                    command=lambda h=hid: self.focus_window(h),
-                )
-                btn._full_name = app["title"]
-                btn.pack(side="left", padx=2)
-                self.active_app_buttons[hid] = btn
-
-        for old_id in list(self.active_app_buttons.keys()):
-            if old_id not in cur_hwnds:
-                if self.active_app_buttons[old_id].winfo_exists():
-                    self.active_app_buttons[old_id].destroy()
-                del self.active_app_buttons[old_id]
-
-        MAX_VISIBLE = 14
-        visible_count = 0
-        self.overflow_apps.clear()
-
-        children = self.apps_container.winfo_children()
-        for child in children:
-            child.pack_forget()
-
-        for child in children:
-            if hasattr(self, "overflow_btn") and child == self.overflow_btn:
-                continue
-
-            if isinstance(child, ctk.CTkButton):
-                if visible_count < MAX_VISIBLE:
-                    child.pack(side="left", padx=2)
-                    visible_count += 1
-                else:
-                    self.overflow_apps.append(child)
-            elif isinstance(child, ctk.CTkFrame):
-                if visible_count < MAX_VISIBLE:
-                    child.pack(side="left", padx=5)
-
-        if self.overflow_apps:
-            if hasattr(self, "overflow_btn"):
-                self.overflow_btn.pack(side="left", padx=2)
-        else:
-            if hasattr(self, "overflow_menu") and self.overflow_menu.winfo_exists():
-                self.overflow_menu.destroy()
-
-        self.after(500, self.update_open_apps)
 
 
 if __name__ == "__main__":
