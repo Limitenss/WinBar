@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FloatingBar Mock Demo</title>
+    <style>
+        /* Base Reset & Typography */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+        }
+
+        body {
+            font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
+            background: linear-gradient(135deg, #1f2326, #3d5a80);
+            height: 100vh;
+            overflow: hidden;
+            color: white;
+        }
+
+        /* Desktop Area */
+        #desktop {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* The Floating Bar */
+        #floating-bar {
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 95%;
+            height: 45px;
+            background-color: rgba(30, 30, 30, 0.631);
+            backdrop-filter: blur(10px);
+            border: 1px solid lightblue;
+            border-radius: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 10px;
+            transition: all 0.3s ease;
+            z-index: 1000;
+        }
+
+        #floating-bar.top { top: 10px; }
+        #floating-bar.bottom { bottom: 10px; }
+
+        /* Edit Mode Styles */
+        #floating-bar.edit-mode {
+            background-color: rgba(59, 48, 20, 0.8);
+            border-color: #ffae00;
+        }
+
+        /* Layout Wings */
+        .wing {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            height: 100%;
+        }
+
+        .wing.left { flex: 1; justify-content: flex-start; }
+        .wing.center { flex: 0; justify-content: center; }
+        .wing.right { flex: 1; justify-content: flex-end; }
+
+        /* Buttons & Widgets */
+        .btn {
+            background: transparent;
+            border: none;
+            color: white;
+            font-size: 16px;
+            cursor: pointer;
+            height: 35px;
+            min-width: 35px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+            font-family: "Segoe UI Emoji", "Segoe UI", sans-serif;
+        }
+
+        .btn:hover { background-color: #2a2a2a; }
+        
+        /* App Icon Styling */
+        .btn.app-icon { 
+            background-color: transparent; 
+            padding: 5px;
+        }
+        .btn.app-icon:hover { 
+            background-color: #3d5a80; 
+        }
+        .btn.app-icon img {
+            width: 22px;
+            height: 22px;
+            object-fit: contain;
+            filter: drop-shadow(0px 2px 2px rgba(0,0,0,0.3));
+        }
+        
+        #apps-container {
+            display: flex;
+            gap: 2px;
+            border-left: 2px solid #555;
+            padding-left: 10px;
+        }
+
+        .text-label {
+            font-size: 12px;
+            font-weight: bold;
+            color: #3d5a80;
+            white-space: nowrap;
+        }
+
+        .sys-label {
+            font-size: 12px;
+            color: #A0A0A0;
+            white-space: nowrap;
+        }
+
+        .clock-label {
+            font-size: 16px;
+            white-space: nowrap;
+        }
+
+        /* Popups / Menus */
+        .popup {
+            position: absolute;
+            background-color: #1a1a1b;
+            border: 1px solid lightblue;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            display: none;
+            flex-direction: column;
+            z-index: 999;
+            transition: opacity 0.2s;
+        }
+
+        .popup.active { display: flex; }
+
+        /* Specific Menu Styling */
+        #start-menu { width: 300px; height: 400px; padding: 15px; }
+        #search-menu { width: 500px; height: 450px; padding: 15px; background-color: #141415; }
+        #tray-menu { width: 250px; padding: 15px; }
+
+        .menu-header { font-size: 20px; font-weight: bold; margin-bottom: 15px; }
+        
+        .start-item {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        .start-item img {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+        }
+        .start-item:hover { background-color: #2a2a2a; }
+
+        .search-bar {
+            width: 100%;
+            height: 45px;
+            background-color: #1c1c1e;
+            border: none;
+            border-radius: 10px;
+            color: white;
+            padding: 0 15px;
+            font-size: 16px;
+            margin-bottom: 15px;
+            outline: none;
+        }
+
+        .bottom-bar {
+            margin-top: auto;
+            background-color: #141415;
+            border-radius: 10px;
+            padding: 10px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .tray-slider { width: 100%; margin: 10px 0; }
+        .tray-select {
+            width: 100%; padding: 8px; background: #2a2a2a; color: white; border: none; border-radius: 5px; margin-bottom: 10px;
+        }
+        .action-btn {
+            width: 100%; padding: 10px; border: none; border-radius: 5px; color: white; cursor: pointer; margin-bottom: 5px; font-weight: bold;
+        }
+        .btn-edit { background-color: #bd8100; }
+        .btn-quit { background-color: #d32f2f; }
+    </style>
+</head>
+<body>
+
+<div id="desktop">
+    
+    <div id="floating-bar" class="top">
+        <div class="wing left">
+            <button class="btn" id="start-btn" onclick="toggleMenu('start-menu', this)">❖</button>
+            <div id="apps-container">
+                <button class="btn app-icon" title="Visual Studio Code">
+                    <img src="https://cdn.simpleicons.org/visualstudiocode/007ACC" alt="VS Code">
+                </button>
+                <button class="btn app-icon" title="Google Chrome">
+                    <img src="https://cdn.simpleicons.org/googlechrome/4285F4" alt="Chrome">
+                </button>
+                <button class="btn app-icon" title="Blender">
+                    <img src="https://cdn.simpleicons.org/blender/F5792A" alt="Blender">
+                </button>
+                <button class="btn app-icon" title="Minecraft">
+                    <img src="https://cdn.simpleicons.org/minecraft/FFFFFF" alt="Minecraft">
+                </button>
+                <button class="btn" style="background:#1a3b5c; margin-left: 5px; font-weight:bold;">⋮</button>
+            </div>
+            <div class="text-label" id="active-window"> > Visual Studio Code...</div>
+        </div>
+
+        <div class="wing center">
+            <button class="btn" id="search-btn" onclick="toggleMenu('search-menu', this)">🔍</button>
+        </div>
+
+        <div class="wing right">
+            <button class="btn" onclick="alert('Mock Task Manager Launched')">📊</button>
+            <div class="sys-label" id="sys-monitor">CPU: 12% | RAM: 45%</div>
+            <div class="clock-label" id="clock">12:00 PM • Mon, Jan 1</div>
+            <button class="btn" id="tray-btn" onclick="toggleMenu('tray-menu', this)">⚙️</button>
+        </div>
+    </div>
+
+    <div id="start-menu" class="popup">
+        <div class="menu-header">👤 User</div>
+        <div style="flex: 1; overflow-y: auto;">
+            <div class="start-item">
+                <img src="https://cdn.simpleicons.org/github/FFFFFF" alt="GitHub">
+                GitHub Desktop.exe
+            </div>
+            <div class="start-item">
+                <img src="https://cdn.simpleicons.org/discord/5865F2" alt="Discord">
+                Discord.exe
+            </div>
+            <div class="start-item">
+                <img src="https://cdn.simpleicons.org/spotify/1DB954" alt="Spotify">
+                Spotify.exe
+            </div>
+        </div>
+        <div class="bottom-bar">
+            <button class="btn">⚙️ Settings</button>
+            <div>
+                <button class="btn" style="display:inline-block; color:#3d5a80;">🌙</button>
+                <button class="btn" style="display:inline-block; color:#d32f2f;">📴</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="search-menu" class="popup">
+        <input type="text" class="search-bar" placeholder="🔍 Search apps...">
+        <div style="flex: 1; overflow-y: auto; color: #777;">
+            Start typing to search mock files...
+        </div>
+    </div>
+
+    <div id="tray-menu" class="popup">
+        <div class="menu-header">Settings</div>
+        <label style="font-size: 12px;">Opacity</label>
+        <input type="range" class="tray-slider" id="opacity-slider" min="0.1" max="1" step="0.05" value="0.63">
+        
+        <label style="font-size: 12px;">Position</label>
+        <select class="tray-select" id="position-select" onchange="changePosition(this.value)">
+            <option value="top">Top</option>
+            <option value="bottom">Bottom</option>
+        </select>
+
+        <button class="action-btn btn-edit" onclick="toggleEditMode()">Edit Layout</button>
+        <button class="action-btn btn-quit" onclick="alert('Quitting App...')">Quit App</button>
+    </div>
+
+</div>
+
+<script>
+    let editMode = false;
+    const bar = document.getElementById('floating-bar');
+    const activeWindow = document.getElementById('active-window');
+    
+    function updateClock() {
+        const now = new Date();
+        const timeOptions = { hour: 'numeric', minute: '2-digit', hour12: true };
+        const dateOptions = { weekday: 'short', month: 'short', day: 'numeric' };
+        
+        const timeString = now.toLocaleTimeString('en-US', timeOptions);
+        const dateString = now.toLocaleDateString('en-US', dateOptions);
+        
+        document.getElementById('clock').innerText = `${timeString}  •  ${dateString}`;
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    function updateSysMonitor() {
+        const cpu = Math.floor(Math.random() * 20) + 5; 
+        const ram = Math.floor(Math.random() * 10) + 40; 
+        document.getElementById('sys-monitor').innerText = `CPU: ${cpu}% | RAM: ${ram}%`;
+    }
+    setInterval(updateSysMonitor, 2000);
+    updateSysMonitor();
+
+    let activeMenu = null;
+    function toggleMenu(menuId, buttonRef) {
+        if (editMode) return; 
+
+        const menu = document.getElementById(menuId);
+        const allMenus = document.querySelectorAll('.popup');
+        
+        allMenus.forEach(m => {
+            if (m.id !== menuId) m.classList.remove('active');
+        });
+
+        if (menu.classList.contains('active')) {
+            menu.classList.remove('active');
+            activeMenu = null;
+        } else {
+            menu.classList.add('active');
+            activeMenu = menu;
+            positionMenu(menu, buttonRef);
+        }
+    }
+
+    function positionMenu(menu, buttonRef) {
+        const rect = buttonRef.getBoundingClientRect();
+        const isTop = bar.classList.contains('top');
+        
+        let centerLeft = rect.left + (rect.width / 2) - (menu.offsetWidth / 2);
+        
+        if (centerLeft < 10) centerLeft = 10;
+        if (centerLeft + menu.offsetWidth > window.innerWidth - 10) {
+            centerLeft = window.innerWidth - menu.offsetWidth - 10;
+        }
+
+        menu.style.left = centerLeft + 'px';
+
+        if (isTop) {
+            menu.style.top = (rect.bottom + 15) + 'px';
+            menu.style.bottom = 'auto';
+        } else {
+            menu.style.bottom = (window.innerHeight - rect.top + 15) + 'px';
+            menu.style.top = 'auto';
+        }
+    }
+
+    document.addEventListener('click', (e) => {
+        if (activeMenu && !activeMenu.contains(e.target) && !bar.contains(e.target)) {
+            activeMenu.classList.remove('active');
+            activeMenu = null;
+        }
+    });
+
+    document.getElementById('opacity-slider').addEventListener('input', (e) => {
+        bar.style.backgroundColor = `rgba(30, 30, 30, ${e.target.value})`;
+    });
+
+    function changePosition(pos) {
+        if (pos === 'bottom') {
+            bar.classList.remove('top');
+            bar.classList.add('bottom');
+        } else {
+            bar.classList.remove('bottom');
+            bar.classList.add('top');
+        }
+        document.querySelectorAll('.popup').forEach(m => m.classList.remove('active'));
+    }
+
+    function toggleEditMode() {
+        editMode = !editMode;
+        if (editMode) {
+            bar.classList.add('edit-mode');
+            activeWindow.innerText = " 🛠 EDIT MODE (DRAG ICONS TO REARRANGE) 🛠";
+            activeWindow.style.color = "#ffae00";
+            document.querySelectorAll('.btn').forEach(b => b.style.cursor = "fleur");
+            document.getElementById('tray-menu').classList.remove('active'); 
+        } else {
+            bar.classList.remove('edit-mode');
+            activeWindow.innerText = " > Visual Studio Code...";
+            activeWindow.style.color = "#3d5a80";
+            document.querySelectorAll('.btn').forEach(b => b.style.cursor = "pointer");
+        }
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.ctrlKey && e.key === 'e') {
+            e.preventDefault();
+            toggleEditMode();
+        }
+    });
+</script>
+
+</body>
+</html>
