@@ -10,6 +10,7 @@ dist/
 # IDEs
 .vscode/
 .idea/
+.claude/
 
 # Local Config
 config.json
