@@ -16,7 +16,7 @@ It sits at the top or bottom of your screen as a compact overlay and gives you q
 
 ## Requirements
 
-- Windows
+- Windows 10
 - Python 3.11+ recommended
 
 ## Install
