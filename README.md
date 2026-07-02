@@ -17,7 +17,7 @@ It sits at the top or bottom of your screen as a compact overlay and gives you q
 ## Requirements
 
 - Windows 10
-- Python 3.11+ recommended
+- Python 3.10+ recommended
 
 ## Install
 
@@ -47,6 +47,8 @@ If you want to package it as an `.exe`:
 pyinstaller Limitens_FloatingBar.spec
 ```
 
+The built app is created at `dist\Limitens_FloatingBar.exe`.
+
 ## Controls
 
 - `Ctrl + E` toggles edit mode so you can rearrange the bar layout
@@ -66,13 +68,14 @@ You can use `config.json.template` as a starting point. A typical config looks l
   "position": "Top",
   "width_percent": 95,
   "height": 45,
-  "bg_color": "#1e1e1e",
-  "opacity": 0.8,
+  "bg_color": "#101216",
+  "opacity": 0.631,
   "layout": {
-    "left": ["apps", "active_window"],
+    "left": ["start", "apps", "active_window"],
     "center": ["search"],
-    "right": ["taskmanager", "sys_monitor", "clock", "tray"]
+    "right": ["taskmanager", "sys_monitor", "clock", "background_apps", "tray", "volume_control"]
   },
+  "hover_tooltips": true,
   "pinned_apps": [
     {
       "name": "Example App",
@@ -90,6 +93,7 @@ You can use `config.json.template` as a starting point. A typical config looks l
 - `bg_color`: background color
 - `opacity`: window transparency
 - `layout`: controls which widgets appear on the left, center, and right
+- `hover_tooltips`: enables or disables hover tooltips
 - `pinned_apps`: apps you want permanently available on the bar
 
 ## Notes

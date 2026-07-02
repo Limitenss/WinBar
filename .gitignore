@@ -6,6 +6,8 @@ __pycache__/
 build/
 dist/
 *.spec
+!Limitens_FloatingBar.spec
+*.log
 
 # IDEs
 .vscode/
